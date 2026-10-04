@@ -1,0 +1,66 @@
+-- K5 HUB • IRON SOUL
+-- UI/feature base adapted from BarneyHub Iron Soul source
+-- Main UI size: 640 x 460
+
+local SOURCE = "https://raw.githubusercontent.com/barneybots/IronSoul/refs/heads/main/IronSoul.lua"
+local K5_LOGO = "rbxassetid://115820469332666"
+
+local ok, src = pcall(function()
+    return game:HttpGet(SOURCE)
+end)
+
+if not ok or type(src) ~= "string" or #src < 1000 then
+    warn("K5 HUB: gagal memuat source Iron Soul")
+    return
+end
+
+-- K5 branding
+src = src:gsub("Barney Hub %- Iron Soul: Dungeon", "K5 HUB • IRON SOUL")
+src = src:gsub("Criado por Barney", "K5 HUB")
+src = src:gsub('HUB_KEY = "BarneyHub_IronSoul"', 'HUB_KEY = "K5_HUB_IronSoul"')
+src = src:gsub('sg.Name = "BarneyHub"', 'sg.Name = "K5_HUB"')
+src = src:gsub('"BARNEY HUB  /  IRON SOUL"', '"K5 HUB  /  IRON SOUL"')
+src = src:gsub('billboard.Name = "BarneyESP"', 'billboard.Name = "K5ESP"')
+src = src:gsub('logoB.Text = "IS"', 'logoB.Text = "K5"')
+src = src:gsub('logoName.Text = "IRON SOUL"', 'logoName.Text = "K5 HUB"')
+src = src:gsub('logoVer.Text = "DUNGEON CONTROL"', 'logoVer.Text = "IRON SOUL"')
+
+-- K5 green accent theme
+src = src:gsub('accent = Color3.fromRGB%(%s*42,%s*198,%s*255%s*%)', 'accent = Color3.fromRGB(80, 255, 140)')
+src = src:gsub('accent2 = Color3.fromRGB%(%s*118,%s*105,%s*255%s*%)', 'accent2 = Color3.fromRGB(45, 210, 110)')
+
+-- Force the requested Barney UI dimensions.
+src = src:gsub('UDim2.new%(%s*0,%s*650,%s*0,%s*470%s*%)', 'UDim2.new(0, 650, 0, 470)')
+src = src:gsub('UDim2.new%(%s*0,%s*640,%s*0,%s*460%s*%)', 'UDim2.new(0, 640, 0, 460)')
+
+-- Add K5 logo asset to the existing logo box after the source creates logoBox.
+local logoPatch = [[
+do
+    local okLogo = pcall(function()
+        local image = Instance.new("ImageLabel")
+        image.Name = "K5Logo"
+        image.Size = UDim2.new(0, 34, 0, 34)
+        image.Position = UDim2.new(0, 7, 0, 6)
+        image.BackgroundTransparency = 1
+        image.Image = "rbxassetid://115820469332666"
+        image.ScaleType = Enum.ScaleType.Fit
+        image.ZIndex = 5
+        image.Parent = logoBox
+        if logoB then logoB.Visible = false end
+    end)
+end
+]]
+
+-- Insert after logoName/visual setup, before the divider.
+src = src:gsub('(%-%- Divider abaixo do logo)', logoPatch .. '\n%1', 1)
+
+local run, compileErr = loadstring(src)
+if not run then
+    warn("K5 HUB: compile error: " .. tostring(compileErr))
+    return
+end
+
+local success, runtimeErr = pcall(run)
+if not success then
+    warn("K5 HUB: runtime error: " .. tostring(runtimeErr))
+end
