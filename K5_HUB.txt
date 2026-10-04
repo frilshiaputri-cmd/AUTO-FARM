@@ -1,0 +1,217 @@
+--==============================================================--
+-- K5 HUB • IRON SOUL V6 ALL FEATURES
+-- K5 UI wrapper around the repository's active V6 script.
+-- Panel size: 360 x 520 (same as source).
+-- K5 logo: rbxassetid://115820469332666
+--==============================================================--
+
+local SOURCE_URL =
+    "https://raw.githubusercontent.com/yasirrhaq/iron-soul-dungeon/refs/heads/main/holygrail/script-v6-full-run-dg.lua"
+
+local K5_LOGO = "rbxassetid://115820469332666"
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local Player = Players.LocalPlayer
+
+local function GetGuiRoot()
+    local PlayerGui = Player:FindFirstChildOfClass("PlayerGui")
+    return PlayerGui or CoreGui
+end
+
+local function FindByName(Name)
+    local Root = GetGuiRoot()
+    local Direct = Root:FindFirstChild(Name, true)
+    if Direct then
+        return Direct
+    end
+
+    for _, Gui in ipairs(CoreGui:GetChildren()) do
+        local Found = Gui:FindFirstChild(Name, true)
+        if Found then
+            return Found
+        end
+    end
+
+    if Player:FindFirstChildOfClass("PlayerGui") then
+        for _, Gui in ipairs(Player:FindFirstChildOfClass("PlayerGui"):GetChildren()) do
+            local Found = Gui:FindFirstChild(Name, true)
+            if Found then
+                return Found
+            end
+        end
+    end
+
+    return nil
+end
+
+local function MakeDraggable(Object)
+    local Dragging = false
+    local DragStart
+    local StartPosition
+    local DragInput
+
+    Object.InputBegan:Connect(function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseButton1
+            or Input.UserInputType == Enum.UserInputType.Touch then
+
+            Dragging = true
+            DragStart = Input.Position
+            StartPosition = Object.Position
+
+            Input.Changed:Connect(function()
+                if Input.UserInputState == Enum.UserInputState.End then
+                    Dragging = false
+                end
+            end)
+        end
+    end)
+
+    Object.InputChanged:Connect(function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseMovement
+            or Input.UserInputType == Enum.UserInputType.Touch then
+            DragInput = Input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(Input)
+        if Dragging and Input == DragInput then
+            local Delta = Input.Position - DragStart
+            Object.Position = UDim2.new(
+                StartPosition.X.Scale,
+                StartPosition.X.Offset + Delta.X,
+                StartPosition.Y.Scale,
+                StartPosition.Y.Offset + Delta.Y
+            )
+        end
+    end)
+end
+
+local function LoadSource()
+    local Ok, Source = pcall(function()
+        return game:HttpGet(SOURCE_URL)
+    end)
+
+    if not Ok or type(Source) ~= "string" or #Source < 1000 then
+        warn("[K5 HUB] Failed to download Iron Soul V6 source.")
+        return false
+    end
+
+    -- Preserve the source functionality while changing visible branding.
+    Source = Source:gsub(
+        'Iron Soul Script by Bugon',
+        'K5 HUB • IRON SOUL'
+    )
+
+    Source = Source:gsub(
+        '© 2026 Bugon%. All rights reserved%.',
+        'K5 HUB • IRON SOUL • V6'
+    )
+
+    -- Source already uses the requested 360x520 panel dimensions.
+    -- This replacement is a guard in case the repository changes its UI size.
+    Source = Source:gsub(
+        'D3DPanel%.Size = UDim2%.fromOffset%(%s*%d+%s*,%s*%d+%s*%)',
+        'D3DPanel.Size = UDim2.fromOffset(360, 520)'
+    )
+
+    local Loader, CompileError = loadstring(Source)
+    if not Loader then
+        warn("[K5 HUB] Iron Soul V6 compile error:", CompileError)
+        return false
+    end
+
+    local OkRun, RunError = pcall(Loader)
+    if not OkRun then
+        warn("[K5 HUB] Iron Soul V6 runtime error:", RunError)
+        return false
+    end
+
+    return true
+end
+
+if not LoadSource() then
+    return
+end
+
+-- Give the source UI a moment to finish building.
+task.spawn(function()
+    local Panel
+    local SourceFloatingIcon
+
+    for _ = 1, 100 do
+        Panel = FindByName("D3DPanel")
+        SourceFloatingIcon = FindByName("FloatingIcon")
+        if Panel then
+            break
+        end
+        task.wait(0.1)
+    end
+
+    if not Panel then
+        warn("[K5 HUB] D3DPanel was not found.")
+        return
+    end
+
+    Panel.Size = UDim2.fromOffset(360, 520)
+
+    local Header = Panel:FindFirstChild("Header")
+    if Header then
+        local Title = Header:FindFirstChild("HeaderTitle")
+        if Title and Title:IsA("TextLabel") then
+            Title.Text = "K5 HUB • IRON SOUL"
+        end
+    end
+
+    -- Disable the original "B" restore button; K5 logo replaces it.
+    if SourceFloatingIcon then
+        SourceFloatingIcon.Visible = false
+    end
+
+    local ExistingK5 = FindByName("K5_HUB_Logo")
+    if ExistingK5 then
+        ExistingK5:Destroy()
+    end
+
+    local RootGui = Panel.Parent
+    local Logo = Instance.new("ImageButton")
+    Logo.Name = "K5_HUB_Logo"
+    Logo.Size = UDim2.fromOffset(56, 56)
+    Logo.Position = UDim2.fromOffset(18, 180)
+    Logo.BackgroundTransparency = 1
+    Logo.BorderSizePixel = 0
+    Logo.Image = K5_LOGO
+    Logo.ImageTransparency = 0
+    Logo.ScaleType = Enum.ScaleType.Fit
+    Logo.Visible = false
+    Logo.Active = true
+    Logo.ZIndex = 100
+    Logo.Parent = RootGui
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(1, 0)
+    Corner.Parent = Logo
+
+    MakeDraggable(Logo)
+
+    local function SyncLogo()
+        Logo.Visible = not Panel.Visible
+        Logo.Image = K5_LOGO
+        if SourceFloatingIcon then
+            SourceFloatingIcon.Visible = false
+        end
+    end
+
+    Panel:GetPropertyChangedSignal("Visible"):Connect(SyncLogo)
+
+    Logo.Activated:Connect(function()
+        Panel.Visible = true
+        Logo.Visible = false
+    end)
+
+    SyncLogo()
+
+    print("[K5 HUB] Iron Soul V6 ALL FEATURES loaded.")
+    print("[K5 HUB] UI: 360x520 | Logo: " .. K5_LOGO)
+end)
