@@ -2,7 +2,7 @@
 -- Repository: AUTO-FARM
 -- Main script: K5_HUB_IronSoul_V6.txt
 
-local URL = "https://raw.githubusercontent.com/frilshiaputri-cmd/AUTO-FARM/refs/heads/main/K5_HUB_Dungeon_Features.txt"
+local URL = "https://raw.githubusercontent.com/frilshiaputri-cmd/AUTO-FARM/refs/heads/main/K5_HUB_Dungeon_Features_small_ui.txt"
 
 local okHttp, source = pcall(function()
     return game:HttpGet(URL)
