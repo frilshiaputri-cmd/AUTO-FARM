@@ -1,0 +1,875 @@
+--[[
+    K5 HUB - Dungeon Feature UI
+    Dibuat berdasarkan fitur yang terlihat pada screenshot pengguna.
+
+    Fitur UI:
+    UTAMA / Pertandingan:
+        - Pergantian Senjata Otomatis
+      - Putar Ulang Otomatis
+      - Auto GiveUp
+      - Kembali ke Lobi Jika Tas Penuh
+
+    FARM:
+      - Pertanian Otomatis
+      - Posisi Peternakan: Di atas / Di bawah / Di belakang
+      - Auto Chest
+      - Auto DragonEgg
+
+    SERANGAN:
+      - Auto Attack
+      - Auto Skill Q / E / R / G
+
+    Catatan:
+    RemoteEvent/RemoteFunction game dapat berbeda. Bagian yang menggunakan
+    input keyboard, ProximityPrompt, target NPC, dan UI dibuat generik agar
+    bisa disesuaikan dengan game.
+]]
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local VirtualUser = game:GetService("VirtualUser")
+local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+local TeleportService = game:GetService("TeleportService")
+
+local LocalPlayer = Players.LocalPlayer
+
+--==================================================
+-- CONFIG
+--==================================================
+
+local Config = {
+    AutoFarm = false,
+    FarmPosition = "Di bawah",
+    AutoChest = false,
+    AutoDragonEgg = true,
+
+    AutoAttack = true,
+    AutoQ = true, -- Skill 1
+    AutoE = true, -- Skill 2
+    AutoR = true, -- Skill 3
+    AutoG = false, -- Skill 4
+
+    AutoWeapon = true,
+    AutoRejoin = false,
+    AutoReplay = true,
+    AutoGiveUp = true,
+    ReturnLobbyFullBag = false,
+
+    AttackDistance = 18,
+    FarmDistance = 10,
+    SkillDelay = 0.25,
+    AttackDelay = 0.12,
+}
+
+local Connections = {}
+local Threads = {}
+
+local function disconnect(name)
+    if Connections[name] then
+        Connections[name]:Disconnect()
+        Connections[name] = nil
+    end
+end
+
+local function startLoop(name, fn, delayTime)
+    if Threads[name] then return end
+
+    Threads[name] = true
+    task.spawn(function()
+        while Threads[name] do
+            local ok, err = pcall(fn)
+            if not ok then
+                warn("[K5 HUB][" .. name .. "] " .. tostring(err))
+            end
+            task.wait(delayTime or 0.2)
+        end
+    end)
+end
+
+local function stopLoop(name)
+    Threads[name] = nil
+end
+
+--==================================================
+-- CHARACTER / TARGET HELPERS
+--==================================================
+
+local function getCharacter()
+    return LocalPlayer.Character
+end
+
+local function getRoot(model)
+    if not model then return nil end
+    return model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("UpperTorso")
+        or model:FindFirstChild("Torso")
+        or model.PrimaryPart
+end
+
+local function getHumanoid(model)
+    if not model then return nil end
+    return model:FindFirstChildOfClass("Humanoid")
+end
+
+local function isAlive(model)
+    local hum = getHumanoid(model)
+    return hum and hum.Health > 0
+end
+
+local function distanceFromPlayer(model)
+    local char = getCharacter()
+    local root = getRoot(char)
+    local targetRoot = getRoot(model)
+    if not root or not targetRoot then return math.huge end
+    return (root.Position - targetRoot.Position).Magnitude
+end
+
+local function findNearestEnemy()
+    local char = getCharacter()
+    local root = getRoot(char)
+    if not root then return nil end
+
+    local best, bestDistance = nil, math.huge
+
+    local folders = {
+        Workspace:FindFirstChild("EnemyNpc"),
+        Workspace:FindFirstChild("Enemies"),
+        Workspace:FindFirstChild("Enemy"),
+        Workspace:FindFirstChild("NPC"),
+        Workspace:FindFirstChild("Mobs"),
+    }
+
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, obj in ipairs(folder:GetChildren()) do
+                if obj:IsA("Model") and obj ~= char and isAlive(obj) then
+                    local d = distanceFromPlayer(obj)
+                    if d < bestDistance then
+                        best = obj
+                        bestDistance = d
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback: scan workspace models with Humanoid.
+    if not best then
+        for _, obj in ipairs(Workspace:GetChildren()) do
+            if obj:IsA("Model") and obj ~= char and isAlive(obj) then
+                local d = distanceFromPlayer(obj)
+                if d < bestDistance and d <= 150 then
+                    best = obj
+                    bestDistance = d
+                end
+            end
+        end
+    end
+
+    return best
+end
+
+--==================================================
+-- INPUT HELPERS
+--==================================================
+
+local function pressKey(key)
+    local ok = pcall(function()
+        VirtualInputManager:SendKeyEvent(true, key, false, game)
+        task.wait(0.04)
+        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end)
+
+    if not ok then
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:SetKeyDown(key)
+            task.wait(0.04)
+            VirtualUser:SetKeyUp(key)
+        end)
+    end
+end
+
+local function clickPrompt(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") then return false end
+
+    local ok = pcall(function()
+        fireproximityprompt(prompt)
+    end)
+
+    return ok
+end
+
+--==================================================
+-- FARM POSITION
+--==================================================
+
+local function getFarmOffset()
+    if Config.FarmPosition == "Di atas" then
+        return Vector3.new(0, Config.FarmDistance, 0)
+    elseif Config.FarmPosition == "Di belakang" then
+        return Vector3.new(0, 2, Config.FarmDistance)
+    else
+        return Vector3.new(0, -Config.FarmDistance, 0)
+    end
+end
+
+local function moveNearTarget(target)
+    local char = getCharacter()
+    local root = getRoot(char)
+    local targetRoot = getRoot(target)
+    if not root or not targetRoot then return end
+
+    local offset = getFarmOffset()
+    local pos = targetRoot.Position + offset
+
+    pcall(function()
+        root.CFrame = CFrame.lookAt(pos, targetRoot.Position)
+    end)
+end
+
+--==================================================
+-- AUTO ATTACK / SKILLS
+--==================================================
+
+local function autoAttack()
+    if not Config.AutoAttack then return end
+
+    local target = findNearestEnemy()
+    if not target then return end
+
+    -- First try the game's equipped tool.
+    local char = getCharacter()
+    if char then
+        local tool = char:FindFirstChildOfClass("Tool")
+        if tool then
+            pcall(function()
+                tool:Activate()
+            end)
+        end
+    end
+
+    -- Fallback for games where basic attack is keyboard driven.
+    pressKey(Enum.KeyCode.MouseButton1)
+end
+
+local function useSkills()
+    if Config.AutoQ then pressKey(Enum.KeyCode.Q) task.wait(Config.SkillDelay) end
+    if Config.AutoE then pressKey(Enum.KeyCode.E) task.wait(Config.SkillDelay) end
+    if Config.AutoR then pressKey(Enum.KeyCode.R) task.wait(Config.SkillDelay) end
+    if Config.AutoG then pressKey(Enum.KeyCode.G) task.wait(Config.SkillDelay) end
+end
+
+--==================================================
+-- CHEST / DRAGON EGG
+--==================================================
+
+local function findNearestPrompt(keywordList)
+    local char = getCharacter()
+    local root = getRoot(char)
+    if not root then return nil end
+
+    local nearest, nearestDistance = nil, math.huge
+
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            local parentName = string.lower(
+                (obj.Parent and obj.Parent:GetFullName() or "") .. " " .. obj.Name
+            )
+
+            local matches = false
+            for _, keyword in ipairs(keywordList) do
+                if string.find(parentName, string.lower(keyword), 1, true) then
+                    matches = true
+                    break
+                end
+            end
+
+            if matches then
+                local part = obj.Parent
+                if part and part:IsA("BasePart") then
+                    local d = (root.Position - part.Position).Magnitude
+                    if d < nearestDistance then
+                        nearest = obj
+                        nearestDistance = d
+                    end
+                end
+            end
+        end
+    end
+
+    return nearest
+end
+
+local function autoChest()
+    if not Config.AutoChest then return end
+
+    local prompt = findNearestPrompt({"chest", "peti", "reward"})
+    if prompt then
+        clickPrompt(prompt)
+    end
+end
+
+local function autoDragonEgg()
+    if not Config.AutoDragonEgg then return end
+
+    local prompt = findNearestPrompt({"dragon", "egg", "telur"})
+    if prompt then
+        clickPrompt(prompt)
+    end
+end
+
+--==================================================
+-- AUTO WEAPON
+--==================================================
+
+local function autoWeapon()
+    if not Config.AutoWeapon then return end
+
+    local char = getCharacter()
+    if not char then return end
+
+    local humanoid = getHumanoid(char)
+    if not humanoid then return end
+
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then return end
+
+    for _, item in ipairs(LocalPlayer.Backpack:GetChildren()) do
+        if item:IsA("Tool") then
+            pcall(function()
+                humanoid:EquipTool(item)
+            end)
+            break
+        end
+    end
+end
+
+--==================================================
+-- AUTO FARM
+--==================================================
+
+local function autoFarm()
+    if not Config.AutoFarm then return end
+
+    local target = findNearestEnemy()
+    if not target then
+        autoChest()
+        autoDragonEgg()
+        return
+    end
+
+    moveNearTarget(target)
+    autoWeapon()
+    autoAttack()
+end
+
+--==================================================
+-- MATCH / LOBBY AUTOMATION
+--==================================================
+
+local function scanText(keyword)
+    keyword = string.lower(keyword)
+
+    for _, obj in ipairs(CoreGui:GetDescendants()) do
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            local ok, txt = pcall(function()
+                return string.lower(obj.Text or "")
+            end)
+
+            if ok and string.find(txt, keyword, 1, true) then
+                return obj
+            end
+        end
+    end
+
+    for _, obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            local ok, txt = pcall(function()
+                return string.lower(obj.Text or "")
+            end)
+
+            if ok and string.find(txt, keyword, 1, true) then
+                return obj
+            end
+        end
+    end
+
+    return nil
+end
+
+local function activateButton(button)
+    if not button then return false end
+
+    if button:IsA("TextButton") or button:IsA("ImageButton") then
+        pcall(function()
+            for _, connection in ipairs(getconnections(button.MouseButton1Click)) do
+                pcall(function()
+                    connection:Fire()
+                end)
+            end
+        end)
+        return true
+    end
+
+    return false
+end
+
+local function autoReplay()
+    if not Config.AutoReplay then return end
+
+    local button =
+        scanText("replay")
+        or scanText("putar ulang")
+        or scanText("ulang lagi")
+
+    if button then
+        activateButton(button)
+    end
+end
+
+local function autoGiveUp()
+    if not Config.AutoGiveUp then return end
+
+    local button =
+        scanText("give up")
+        or scanText("giveup")
+        or scanText("menyerah")
+
+    if button then
+        activateButton(button)
+    end
+end
+
+local function autoRejoin()
+    if not Config.AutoRejoin then return end
+
+    -- Rejoin the current place/server when Roblox exposes the player as disconnected.
+    -- This is intentionally conservative so it does not continuously teleport while playing.
+    if not LocalPlayer or not LocalPlayer.Parent then
+        pcall(function()
+            TeleportService:Teleport(game.PlaceId, LocalPlayer)
+        end)
+    end
+end
+
+local function returnLobbyIfFull()
+    if not Config.ReturnLobbyFullBag then return end
+
+    local full =
+        scanText("bag full")
+        or scanText("tas penuh")
+        or scanText("inventory full")
+
+    if full then
+        local lobbyButton =
+            scanText("lobby")
+            or scanText("kembali ke lobi")
+
+        if lobbyButton then
+            activateButton(lobbyButton)
+        end
+    end
+end
+
+--==================================================
+-- MAIN AUTOMATION LOOPS
+--==================================================
+
+local function updateLoops()
+    stopLoop("farm")
+    stopLoop("attack")
+    stopLoop("skills")
+    stopLoop("chest")
+    stopLoop("egg")
+    stopLoop("weapon")
+    stopLoop("match")
+
+    if Config.AutoFarm then
+        startLoop("farm", autoFarm, 0.18)
+    end
+
+    if Config.AutoAttack then
+        startLoop("attack", autoAttack, Config.AttackDelay)
+    end
+
+    if Config.AutoQ or Config.AutoE or Config.AutoR or Config.AutoG then
+        startLoop("skills", useSkills, 2.0)
+    end
+
+    if Config.AutoChest then
+        startLoop("chest", autoChest, 1.0)
+    end
+
+    if Config.AutoDragonEgg then
+        startLoop("egg", autoDragonEgg, 1.0)
+    end
+
+    if Config.AutoWeapon then
+        startLoop("weapon", autoWeapon, 0.7)
+    end
+
+    if Config.AutoReplay or Config.AutoGiveUp or Config.ReturnLobbyFullBag or Config.AutoRejoin then
+        startLoop("match", function()
+            autoReplay()
+            autoGiveUp()
+            returnLobbyIfFull()
+            autoRejoin()
+        end, 1.0)
+    end
+end
+
+--==================================================
+-- K5 HUB UI
+--==================================================
+
+local old = CoreGui:FindFirstChild("K5_HUB_Dungeon")
+if old then
+    old:Destroy()
+end
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "K5_HUB_Dungeon"
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = true
+Gui.Parent = CoreGui
+
+local function corner(obj, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 10)
+    c.Parent = obj
+end
+
+local function stroke(obj, transparency)
+    local s = Instance.new("UIStroke")
+    s.Color = Color3.fromRGB(255, 110, 55)
+    s.Transparency = transparency or 0.55
+    s.Thickness = 1
+    s.Parent = obj
+end
+
+local function makeText(parent, text, size, bold)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextColor3 = Color3.fromRGB(245, 245, 245)
+    l.TextSize = size or 14
+    l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = parent
+    return l
+end
+
+local Main = Instance.new("Frame")
+local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600)
+local mobileWidth = math.clamp(viewport.X - 40, 260, 440)
+local mobileHeight = math.clamp(viewport.Y - 120, 360, 540)
+
+Main.Size = UDim2.fromOffset(mobileWidth, mobileHeight)
+Main.Position = UDim2.new(0.5, -mobileWidth/2, 0.5, -mobileHeight/2)
+Main.BackgroundColor3 = Color3.fromRGB(25, 25, 27)
+Main.BackgroundTransparency = 0.08
+Main.Parent = Gui
+corner(Main, 14)
+stroke(Main, 0.35)
+
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 50)
+Header.BackgroundColor3 = Color3.fromRGB(20, 20, 22)
+Header.BackgroundTransparency = 0.05
+Header.Parent = Main
+corner(Header, 14)
+
+local Logo = Instance.new("ImageLabel")
+Logo.Size = UDim2.fromOffset(34, 34)
+Logo.Position = UDim2.fromOffset(10, 8)
+Logo.BackgroundTransparency = 1
+Logo.Image = "rbxassetid://115820469332666"
+Logo.Parent = Header
+
+local Title = makeText(Header, "K5 HUB | Dungeon", 14, true)
+Title.Position = UDim2.fromOffset(52, 6)
+Title.Size = UDim2.new(1, -160, 0, 25)
+
+local Sub = makeText(Header, "HP • Farm • Combat • Auto", 10, false)
+Sub.TextColor3 = Color3.fromRGB(170, 170, 170)
+Sub.Position = UDim2.fromOffset(52, 27)
+Sub.Size = UDim2.new(1, -160, 0, 20)
+
+local Close = Instance.new("TextButton")
+Close.Size = UDim2.fromOffset(34, 34)
+Close.Position = UDim2.new(1, -42, 0, 8)
+Close.BackgroundColor3 = Color3.fromRGB(45, 45, 48)
+Close.Text = "×"
+Close.TextColor3 = Color3.new(1,1,1)
+Close.TextSize = 22
+Close.Font = Enum.Font.GothamBold
+Close.Parent = Header
+corner(Close, 10)
+
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.fromOffset(96, mobileHeight - 64)
+Sidebar.Position = UDim2.fromOffset(6, 56)
+Sidebar.BackgroundTransparency = 1
+Sidebar.Parent = Main
+
+local Content = Instance.new("ScrollingFrame")
+Content.Size = UDim2.new(1, -112, 1, -66)
+Content.Position = UDim2.fromOffset(106, 58)
+Content.BackgroundTransparency = 1
+Content.ScrollBarThickness = 3
+Content.CanvasSize = UDim2.new()
+Content.Parent = Main
+
+local List = Instance.new("UIListLayout")
+List.Padding = UDim.new(0, 5)
+List.Parent = Content
+
+local function clearContent()
+    for _, child in ipairs(Content:GetChildren()) do
+        if not child:IsA("UIListLayout") then
+            child:Destroy()
+        end
+    end
+end
+
+local function addSection(text)
+    local s = makeText(Content, text, 13, true)
+    s.Size = UDim2.new(1, -6, 0, 26)
+    s.TextColor3 = Color3.fromRGB(255, 220, 205)
+end
+
+local function addToggle(label, key)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -6, 0, 42)
+    row.BackgroundColor3 = Color3.fromRGB(35, 35, 38)
+    row.BackgroundTransparency = 0.12
+    row.Parent = Content
+    corner(row, 8)
+
+    local text = makeText(row, label, 11, false)
+    text.Position = UDim2.fromOffset(10, 0)
+    text.Size = UDim2.new(1, -82, 1, 0)
+    text.TextTruncate = Enum.TextTruncate.AtEnd
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.fromOffset(58, 28)
+    button.Position = UDim2.new(1, -66, 0.5, -14)
+    button.Text = ""
+    button.Parent = row
+    corner(button, 14)
+
+    local status = makeText(button, "OFF", 9, true)
+    status.TextXAlignment = Enum.TextXAlignment.Center
+    status.Size = UDim2.new(1, 0, 1, 0)
+    status.Position = UDim2.fromOffset(0, 0)
+    status.ZIndex = 2
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(22, 22)
+    knob.Parent = button
+    corner(knob, 11)
+    knob.ZIndex = 3
+
+    local function refresh()
+        local on = Config[key]
+        if on then
+            button.BackgroundColor3 = Color3.fromRGB(215, 105, 60)
+            status.Text = "ON"
+            status.TextXAlignment = Enum.TextXAlignment.Left
+            status.Position = UDim2.fromOffset(8, 0)
+            knob.Position = UDim2.new(1, -25, 0.5, -11)
+        else
+            button.BackgroundColor3 = Color3.fromRGB(70, 70, 73)
+            status.Text = "OFF"
+            status.TextXAlignment = Enum.TextXAlignment.Right
+            status.Position = UDim2.fromOffset(-8, 0)
+            knob.Position = UDim2.fromOffset(3, 3)
+        end
+    end
+
+    button.MouseButton1Click:Connect(function()
+        Config[key] = not Config[key]
+        refresh()
+        updateLoops()
+    end)
+
+    refresh()
+    return row
+end
+
+local function addDropdown(label, key, values)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -6, 0, 42)
+    row.BackgroundColor3 = Color3.fromRGB(35, 35, 38)
+    row.BackgroundTransparency = 0.12
+    row.Parent = Content
+    corner(row, 8)
+
+    local text = makeText(row, label, 14, false)
+    text.Position = UDim2.fromOffset(10, 0)
+    text.Size = UDim2.new(0.45, 0, 1, 0)
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0.45, 0, 0, 30)
+    btn.Position = UDim2.new(0.52, 0, 0.5, -15)
+    btn.BackgroundColor3 = Color3.fromRGB(48, 48, 51)
+    btn.TextColor3 = Color3.fromRGB(240,240,240)
+    btn.Text = tostring(Config[key])
+    btn.TextSize = 10
+    btn.Font = Enum.Font.Gotham
+    btn.Parent = row
+    corner(btn, 8)
+
+    local index = 1
+    for i,v in ipairs(values) do
+        if v == Config[key] then index = i end
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        index = index + 1
+        if index > #values then index = 1 end
+        Config[key] = values[index]
+        btn.Text = tostring(Config[key])
+    end)
+
+    return row
+end
+
+local function addNav(text, callback)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -4, 0, 42)
+    b.BackgroundColor3 = Color3.fromRGB(37, 37, 40)
+    b.Text = "  " .. text
+    b.TextColor3 = Color3.fromRGB(235,235,235)
+    b.TextSize = 11
+    b.Font = Enum.Font.Gotham
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.Parent = Sidebar
+    corner(b, 9)
+
+    b.MouseButton1Click:Connect(callback)
+    return b
+end
+
+local function pageMain()
+    clearContent()
+
+    addSection("Farm")
+    addToggle("Auto Farm", "AutoFarm")
+    addDropdown("Posisi Farm", "FarmPosition", {"Di atas", "Di bawah", "Di belakang"})
+    addToggle("Auto Chest", "AutoChest")
+    addToggle("Auto DragonEgg", "AutoDragonEgg")
+
+    addSection("Serangan dan Keterampilan")
+    addToggle("Auto Attack", "AutoAttack")
+    addToggle("Auto Skill 1 [Q]", "AutoQ")
+    addToggle("Auto Skill 2 [E]", "AutoE")
+    addToggle("Auto Skill 3 [R]", "AutoR")
+    addToggle("Auto Skill 4 [G]", "AutoG")
+
+    addSection("Pertandingan")
+    addToggle("Ganti Senjata Otomatis", "AutoWeapon")
+    addToggle("Rejoin Otomatis", "AutoRejoin")
+    addToggle("Auto GiveUp", "AutoGiveUp")
+    addToggle("Kembali ke Lobi Jika Tas Penuh", "ReturnLobbyFullBag")
+end
+
+local function pageFarm()
+    pageMain()
+end
+
+local function pageCombat()
+    clearContent()
+
+    addSection("Serangan dan Keterampilan")
+    addToggle("Auto Attack", "AutoAttack")
+    addToggle("Auto Skill 1 [Q]", "AutoQ")
+    addToggle("Auto Skill 2 [E]", "AutoE")
+    addToggle("Auto Skill 3 [R]", "AutoR")
+    addToggle("Auto Skill 4 [G]", "AutoG")
+
+    addSection("Farm")
+    addToggle("Auto Farm", "AutoFarm")
+    addDropdown("Posisi Farm", "FarmPosition", {"Di atas", "Di bawah", "Di belakang"})
+    addToggle("Auto Chest", "AutoChest")
+    addToggle("Auto DragonEgg", "AutoDragonEgg")
+end
+
+addNav("⌂   Utama", pageMain)
+addNav("⚔   Farm", pageFarm)
+addNav("◈   Serangan", pageCombat)
+
+pageMain()
+
+--==================================================
+-- DRAGGABLE
+--==================================================
+
+local dragging = false
+local dragStart
+local startPos
+
+Header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if not dragging then return end
+
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+
+--==================================================
+-- MINIMIZE / OPEN LOGO
+--==================================================
+
+local Mini = Instance.new("ImageButton")
+Mini.Size = UDim2.fromOffset(66, 66)
+Mini.Position = UDim2.fromOffset(18, 150)
+Mini.BackgroundColor3 = Color3.fromRGB(28,28,30)
+Mini.Image = "rbxassetid://115820469332666"
+Mini.Visible = false
+Mini.Parent = Gui
+corner(Mini, 14)
+stroke(Mini, 0.35)
+
+Close.MouseButton1Click:Connect(function()
+    Main.Visible = false
+    Mini.Visible = true
+end)
+
+Mini.MouseButton1Click:Connect(function()
+    Main.Visible = true
+    Mini.Visible = false
+end)
+
+-- Start current configuration.
+updateLoops()
+
+print("[K5 HUB] Dungeon feature UI loaded.")
